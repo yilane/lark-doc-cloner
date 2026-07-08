@@ -1,0 +1,20 @@
+{
+  "skill_name": "lark-doc-cloner",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "帮我把这个飞书文档复刻到我的飞书里：https://example.feishu.cn/docx/ExampleToken123",
+      "expected_output": "应该使用 lark-doc-cloner，说明需要 lark-cli 登录，调用脚本执行复刻，并返回新文档链接或清晰错误。"
+    },
+    {
+      "id": 2,
+      "prompt": "这个文档我只有查看权限，不能编辑。能不能复制一份我自己的？https://example.feishu.cn/wiki/WikiToken123",
+      "expected_output": "应该说明不会绕过权限，只要能查看就通过 fetch + create 重建，并执行复刻流程。"
+    },
+    {
+      "id": 3,
+      "prompt": "给我总结一下这个飞书文档：https://example.feishu.cn/docx/ExampleToken123",
+      "expected_output": "不应该触发复刻流程；这是总结任务，不是复制或复刻。"
+    }
+  ]
+}
