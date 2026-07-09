@@ -30,6 +30,21 @@
       "id": 6,
       "prompt": "如果里面有 Base、画板、同步块，创建失败的话就用文字标出来，别直接卡死。",
       "expected_output": "应该使用 --degrade-unsupported，并说明会把高风险块降级为文本占位，同时在 warnings 和 block-report.json 中记录。"
+    },
+    {
+      "id": 7,
+      "prompt": "这个文档如果能直接复制就直接复制，复制不行再重建。目标文件夹 token 是 fldExample123。",
+      "expected_output": "应该使用默认 --mode auto 和 --parent-token fldExample123；先尝试 drive files copy，失败后回退 docs fetch + create rebuild。"
+    },
+    {
+      "id": 8,
+      "prompt": "这个文档里的图片和附件要下载下来，并尽量插回原来的位置。",
+      "expected_output": "应该使用 --reinsert-media；说明会用媒体锚点定位，创建后 docs +media-insert 插回锚点附近，并生成 media-insert.json。"
+    },
+    {
+      "id": 9,
+      "prompt": "帮我把这个飞书 Wiki 整棵树递归克隆到我的个人文档库：https://example.feishu.cn/wiki/WikiToken123",
+      "expected_output": "应该使用 --wiki-recursive；说明会 node-get、node-list、node-create、docs fetch/update 递归重建节点树。"
     }
   ]
 }

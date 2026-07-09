@@ -37,11 +37,14 @@
 ```mermaid
 flowchart LR
   A["用户文档 URL"] --> B["drive +inspect"]
-  B --> C["docs +fetch full XML"]
-  C --> D["保存 raw XML"]
-  D --> E["清洗 XML"]
-  E --> F["docs +create"]
-  F --> G["新文档 URL"]
+  B --> C{"mode auto 可 copy?"}
+  C -->|yes| H["drive files copy"]
+  C -->|no / failed| D["docs +fetch full XML"]
+  D --> E["保存 raw XML"]
+  E --> F["清洗 XML"]
+  F --> G["docs +create"]
+  H --> I["新文档 URL"]
+  G --> I
 ```
 
 ## 为什么不用编辑权限
@@ -93,6 +96,23 @@ lark-cli docs +create \
 
 默认不传 `parent-position`，让飞书创建到云盘根目录。
 
+Drive 直接复制：
+
+```bash
+lark-cli drive files copy \
+  --as user \
+  --file-token "<source_token>" \
+  --data '{"folder_token":"<target_folder_token>","name":"<title> - clone","type":"docx"}' \
+  --json
+```
+
+注意：
+
+- Drive copy 需要目标 `folder_token`。
+- 默认云盘根目录没有稳定 folder token 时，脚本会跳过 copy，继续 rebuild。
+- `--mode copy` 会强制只走 copy；失败就报错。
+- `--mode rebuild` 会跳过 copy。
+
 ## 中间产物
 
 脚本会输出：
@@ -107,6 +127,8 @@ reference-map.json
 block-report.json
 media-manifest.json
 create.json
+copy.json
+media-insert.json
 result.json
 ```
 
@@ -246,13 +268,31 @@ id="..."
 2. 保存到输出目录的 `media/`。
 3. 在 `media-manifest.json` 里记录下载状态。
 
+用户传 `--reinsert-media` 时：
+
+1. 清洗 XML 前扫描图片和附件。
+2. 把 `<img>`、`<image>`、`<file>`、`<attachment>`、`<source>` 替换为唯一锚点：
+
+```xml
+<p>[LARK_DOC_CLONER_MEDIA_001]</p>
+```
+
+3. 新文档创建成功后，下载媒体资源。
+4. 用 `docs +media-insert --selection-with-ellipsis "[LARK_DOC_CLONER_MEDIA_001]"` 插到锚点附近。
+5. 用 `docs +update --command str_replace` 尝试删除锚点文字。
+6. 写入 `media-insert.json`。
+
+边界：
+
+- 插入位置依赖锚点文本匹配。
+- 表格、callout、嵌套列表里的媒体可能被插到顶层祖先附近，这是 `docs +media-insert` 的 CLI 行为。
+- 如果锚点删除失败，新文档会保留标记，报告里会记录。
+
 仍待二开的更强方案：
 
-1. 扫描 `<img>` 和 `<source>`。
-2. 用 `docs +media-download` 下载。
-3. 新建文档后用 `docs +media-insert` 插入。
-4. 通过文本锚点或 block id 把媒体插回原位置。
-5. 对附件使用 `--type file` 和 `--file-view` 选择展示方式。
+1. 创建后重新 fetch 新文档 block id。
+2. 用 block 级编辑精确移动或替换锚点块。
+3. 对表格单元格内媒体做专用补偿。
 
 当前版本不会承诺“附件已完整插回原位”。
 它只完成“识别、记录、可选下载”。
@@ -276,14 +316,42 @@ python scripts/clone_lark_doc.py --docs-file docs.txt --continue-on-error
 
 ### 4. Wiki 树复刻
 
-当前脚本复刻单篇文档。
+当前脚本支持两条路径。
+
+默认递归重建：
 
 Wiki 树复刻需要：
 
 1. `wiki +node-get` 解析当前节点。
 2. `wiki +node-list` 遍历子节点。
-3. 对每个 docx 节点执行单篇复刻。
-4. 在目标 wiki 下重建层级。
+3. `wiki +node-create` 在目标空间创建对应节点。
+4. `docs +fetch` 读取源节点正文。
+5. `docs +update --command overwrite` 写入目标节点。
+6. 对子节点递归执行。
+
+使用：
+
+```bash
+python scripts/clone_lark_doc.py "<wiki_url>" --wiki-recursive
+```
+
+默认目标空间是 `my_library`。
+也可以传：
+
+```bash
+--wiki-target-space-id "<space_id>"
+--wiki-target-parent-node-token "<node_token>"
+--wiki-max-depth 20
+```
+
+原生 Wiki copy：
+
+```bash
+python scripts/clone_lark_doc.py "<wiki_url>" --wiki-native-copy --yes
+```
+
+`wiki +node-copy` 是高风险写操作。
+除非用户明确确认，否则不要自动加 `--yes`。
 
 ### 5. 本地 Helper 服务
 

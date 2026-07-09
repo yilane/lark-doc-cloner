@@ -89,6 +89,7 @@ RISKY_BLOCKS: dict[str, dict[str, str]] = {
 }
 
 MEDIA_TAGS = {"img", "image", "source", "file", "attachment"}
+COPYABLE_TYPES = {"doc", "docx", "sheet", "bitable", "file", "mindnote", "slides"}
 
 
 class CloneError(RuntimeError):
@@ -206,6 +207,22 @@ def write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def first_dict(*values: Any) -> dict[str, Any]:
+    for value in values:
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def dig(value: Any, *keys: str) -> Any:
+    current = value
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
 def parse_attrs(tag: str) -> dict[str, str]:
     attrs: dict[str, str] = {}
     for match in ATTR_RE.finditer(tag):
@@ -240,6 +257,7 @@ def collect_media_assets(xml: str) -> list[dict[str, Any]]:
         assets.append(
             {
                 "index": len(assets) + 1,
+                "anchor": f"LARK_DOC_CLONER_MEDIA_{len(assets) + 1:03d}",
                 "tag": tag_name,
                 "type": asset_type,
                 "token": token,
@@ -251,6 +269,23 @@ def collect_media_assets(xml: str) -> list[dict[str, Any]]:
             }
         )
     return assets
+
+
+def replace_media_with_anchors(xml: str, assets: list[dict[str, Any]]) -> str:
+    index = 0
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal index
+        tag_name = match.group(1).split(":")[-1].lower()
+        if tag_name not in MEDIA_TAGS:
+            return match.group(0)
+        if index >= len(assets):
+            return match.group(0)
+        anchor = assets[index]["anchor"]
+        index += 1
+        return f"<p>[{anchor}]</p>"
+
+    return re.sub(r"<\s*([A-Za-z][\w:.-]*)\b[^>]*?/?>", replace, xml, flags=re.S)
 
 
 def analyze_blocks(xml: str) -> dict[str, Any]:
@@ -340,6 +375,422 @@ def download_media_assets(
     return assets
 
 
+def extract_inspect_info(inspect_payload: dict[str, Any]) -> dict[str, Any]:
+    data = first_dict(inspect_payload.get("data"), inspect_payload)
+    document = first_dict(data.get("document"))
+    return {
+        "title": data.get("title") or data.get("name") or document.get("title") or document.get("name"),
+        "token": data.get("token") or data.get("obj_token") or data.get("file_token") or document.get("token"),
+        "type": data.get("type") or data.get("obj_type") or data.get("file_type") or document.get("type"),
+        "url": data.get("url") or document.get("url"),
+        "node_token": data.get("node_token") or data.get("wiki_token"),
+        "space_id": data.get("space_id"),
+    }
+
+
+def extract_created_file(payload: Any) -> dict[str, Any]:
+    data = first_dict(payload.get("data") if isinstance(payload, dict) else None, payload)
+    file_obj = first_dict(data.get("file"), data.get("document"), data.get("node"))
+    return {
+        "token": file_obj.get("token") or file_obj.get("document_id") or file_obj.get("obj_token"),
+        "type": file_obj.get("type") or file_obj.get("obj_type"),
+        "title": file_obj.get("name") or file_obj.get("title"),
+        "url": file_obj.get("url"),
+        "raw": payload,
+    }
+
+
+def try_drive_copy(
+    source: str,
+    title: str,
+    inspect_payload: dict[str, Any],
+    parent_target: dict[str, str],
+    profile: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    info = extract_inspect_info(inspect_payload)
+    source_token = info.get("token")
+    source_type = info.get("type")
+    if not source_token or source_type not in COPYABLE_TYPES:
+        return {
+            "ok": False,
+            "skipped": True,
+            "reason": f"Drive copy 需要可复制的 token/type，当前 token={source_token}, type={source_type}",
+        }
+    if parent_target["type"] != "parent-token":
+        return {
+            "ok": False,
+            "skipped": True,
+            "reason": "Drive copy 需要目标 folder token；当前目标不是 parent-token，已回退 rebuild。",
+        }
+
+    data = {
+        "folder_token": parent_target["value"],
+        "name": title,
+        "type": source_type,
+    }
+    cmd = [
+        "drive",
+        "files",
+        "copy",
+        "--as",
+        "user",
+        "--file-token",
+        str(source_token),
+        "--data",
+        json.dumps(data, ensure_ascii=False),
+        "--json",
+    ]
+    if dry_run:
+        cmd.append("--dry-run")
+    result = run_lark(cmd, profile=profile, check=False)
+    payload = result.get("json")
+    created = extract_created_file(payload) if isinstance(payload, dict) else {}
+    return {
+        "ok": result["returncode"] == 0 and (bool(created.get("url")) or dry_run),
+        "skipped": False,
+        "source": source,
+        "cmd": result["cmd"],
+        "returncode": result["returncode"],
+        "stdout": result["stdout"],
+        "stderr": result["stderr"],
+        "payload": payload,
+        "url": created.get("url"),
+        "token": created.get("token"),
+        "type": created.get("type"),
+    }
+
+
+def insert_downloaded_media(
+    doc_url: str,
+    assets: list[dict[str, Any]],
+    profile: str | None = None,
+    dry_run: bool = False,
+    cleanup_anchor: bool = True,
+) -> list[dict[str, Any]]:
+    operations: list[dict[str, Any]] = []
+    for asset in assets:
+        path = asset.get("download_path")
+        anchor = asset.get("anchor")
+        if not path or not anchor or not asset.get("downloaded"):
+            asset["insert_status"] = "skipped"
+            continue
+        media_type = "image" if asset.get("type") == "image" else "file"
+        insert_args = [
+            "docs",
+            "+media-insert",
+            "--as",
+            "user",
+            "--doc",
+            doc_url,
+            "--file",
+            str(path),
+            "--type",
+            media_type,
+            "--selection-with-ellipsis",
+            f"[{anchor}]",
+            "--json",
+        ]
+        if media_type == "file":
+            insert_args.extend(["--file-view", "card"])
+        if dry_run:
+            insert_args.append("--dry-run")
+        insert_result = run_lark(insert_args, profile=profile, check=False)
+        op = {
+            "anchor": anchor,
+            "file": path,
+            "type": media_type,
+            "insert_cmd": insert_result["cmd"],
+            "insert_returncode": insert_result["returncode"],
+            "insert_stdout": insert_result["stdout"],
+            "insert_stderr": insert_result["stderr"],
+            "insert_payload": insert_result.get("json"),
+        }
+        asset["insert_status"] = "inserted" if insert_result["returncode"] == 0 else "insert-failed"
+        if cleanup_anchor and insert_result["returncode"] == 0:
+            cleanup_args = [
+                "docs",
+                "+update",
+                "--as",
+                "user",
+                "--doc",
+                doc_url,
+                "--command",
+                "str_replace",
+                "--pattern",
+                f"[{anchor}]",
+                "--content",
+                "",
+                "--json",
+            ]
+            if dry_run:
+                cleanup_args.append("--dry-run")
+            cleanup_result = run_lark(cleanup_args, profile=profile, check=False)
+            op["cleanup_cmd"] = cleanup_result["cmd"]
+            op["cleanup_returncode"] = cleanup_result["returncode"]
+            op["cleanup_stdout"] = cleanup_result["stdout"]
+            op["cleanup_stderr"] = cleanup_result["stderr"]
+            op["cleanup_payload"] = cleanup_result.get("json")
+            asset["anchor_cleanup_status"] = "removed" if cleanup_result["returncode"] == 0 else "cleanup-failed"
+        operations.append(op)
+    return operations
+
+
+def extract_wiki_node(payload: Any) -> dict[str, Any]:
+    data = first_dict(payload.get("data") if isinstance(payload, dict) else None, payload)
+    node = first_dict(data.get("node"), data.get("item"), data)
+    return {
+        "node_token": node.get("node_token") or node.get("token"),
+        "space_id": node.get("space_id"),
+        "obj_token": node.get("obj_token"),
+        "obj_type": node.get("obj_type"),
+        "title": node.get("title") or node.get("name"),
+        "url": node.get("url"),
+        "raw": payload,
+    }
+
+
+def extract_wiki_items(payload: Any) -> list[dict[str, Any]]:
+    data = first_dict(payload.get("data") if isinstance(payload, dict) else None, payload)
+    items = data.get("items") or data.get("nodes") or data.get("list") or []
+    if not isinstance(items, list):
+        return []
+    return [extract_wiki_node({"data": {"node": item}}) for item in items if isinstance(item, dict)]
+
+
+def try_wiki_native_copy(args: argparse.Namespace, output_dir: Path) -> dict[str, Any]:
+    get_result = run_lark(["wiki", "+node-get", "--as", "user", "--node-token", args.doc, "--json"], profile=args.profile)
+    get_payload = get_result.get("json")
+    write_json(output_dir / "wiki-source-node.json", get_payload or {"stdout": get_result["stdout"], "stderr": get_result["stderr"]})
+    source_node = extract_wiki_node(get_payload)
+    if not source_node.get("node_token"):
+        raise CloneError("无法解析源 Wiki node_token。")
+    if not source_node.get("space_id"):
+        raise CloneError("无法解析源 Wiki space_id。")
+    copy_cmd = [
+        "wiki",
+        "+node-copy",
+        "--as",
+        "user",
+        "--node-token",
+        str(source_node["node_token"]),
+        "--space-id",
+        str(source_node["space_id"]),
+        "--json",
+    ]
+    if args.wiki_target_parent_node_token:
+        copy_cmd.extend(["--target-parent-node-token", args.wiki_target_parent_node_token])
+    else:
+        copy_cmd.extend(["--target-space-id", args.wiki_target_space_id or "my_library"])
+    if args.title:
+        copy_cmd.extend(["--title", args.title])
+    if args.yes:
+        copy_cmd.append("--yes")
+    if args.dry_run:
+        copy_cmd.append("--dry-run")
+    result = run_lark(copy_cmd, profile=args.profile, check=False)
+    payload = result.get("json")
+    write_json(output_dir / "wiki-native-copy.json", payload or {"stdout": result["stdout"], "stderr": result["stderr"]})
+    copied = extract_wiki_node(payload) if isinstance(payload, dict) else {}
+    return {
+        "ok": result["returncode"] == 0 and (bool(copied.get("url") or copied.get("node_token")) or args.dry_run),
+        "mode": "wiki-native-copy",
+        "source": args.doc,
+        "source_node": source_node,
+        "target_node": copied,
+        "cmd": result["cmd"],
+        "returncode": result["returncode"],
+        "stdout": result["stdout"],
+        "stderr": result["stderr"],
+        "payload": payload,
+        "output_dir": str(output_dir),
+    }
+
+
+def create_wiki_doc_node(
+    title: str,
+    args: argparse.Namespace,
+    parent_node_token: str | None = None,
+) -> dict[str, Any]:
+    cmd = [
+        "wiki",
+        "+node-create",
+        "--as",
+        "user",
+        "--obj-type",
+        "docx",
+        "--title",
+        title,
+        "--json",
+    ]
+    if parent_node_token:
+        cmd.extend(["--parent-node-token", parent_node_token])
+    else:
+        cmd.extend(["--space-id", args.wiki_target_space_id or "my_library"])
+    if args.dry_run:
+        cmd.append("--dry-run")
+    result = run_lark(cmd, profile=args.profile, check=False)
+    payload = result.get("json")
+    node = extract_wiki_node(payload) if isinstance(payload, dict) else {}
+    node.update({"cmd": result["cmd"], "returncode": result["returncode"], "stdout": result["stdout"], "stderr": result["stderr"]})
+    if result["returncode"] != 0:
+        raise CloneError(result["stderr"] or result["stdout"] or "wiki +node-create failed")
+    return node
+
+
+def fetch_normalized_content_for_doc(doc: str, args: argparse.Namespace, output_dir: Path) -> tuple[str, str, list[str], dict[str, Any]]:
+    inspect = run_lark(["drive", "+inspect", "--url", doc, "--json"], profile=args.profile, check=False)
+    write_json(output_dir / "inspect.json", inspect.get("json") or {"stdout": inspect["stdout"], "stderr": inspect["stderr"]})
+    fetch = run_lark(
+        [
+            "docs",
+            "+fetch",
+            "--doc",
+            doc,
+            "--scope",
+            "full",
+            "--detail",
+            "full",
+            "--doc-format",
+            "xml",
+            "--as",
+            "user",
+            "--json",
+        ],
+        profile=args.profile,
+    )
+    fetch_payload = fetch.get("json")
+    if not isinstance(fetch_payload, dict):
+        raise CloneError("docs +fetch 没有返回 JSON。")
+    write_json(output_dir / "fetch.json", fetch_payload)
+    document = extract_document(fetch_payload)
+    raw_xml = document["content"]
+    (output_dir / "content.raw.xml").write_text(raw_xml, encoding="utf-8")
+    clone_xml, warnings, diagnostics = normalize_xml(
+        raw_xml,
+        degrade_unsupported=args.degrade_unsupported,
+        reinsert_media=False,
+    )
+    (output_dir / "content.clone.xml").write_text(clone_xml, encoding="utf-8")
+    write_json(output_dir / "block-report.json", diagnostics)
+    title = args.title or extract_title(inspect.get("json") or {}, document, args.title_suffix)
+    return title, clone_xml, warnings, diagnostics
+
+
+def overwrite_wiki_node_content(target_node: dict[str, Any], content_path: Path, args: argparse.Namespace) -> dict[str, Any]:
+    doc_target = target_node.get("url") or target_node.get("obj_token") or target_node.get("node_token")
+    if not doc_target:
+        raise CloneError("新 Wiki 节点没有可写入的 doc token/url。")
+    cmd = [
+        "docs",
+        "+update",
+        "--as",
+        "user",
+        "--doc",
+        str(doc_target),
+        "--command",
+        "overwrite",
+        "--content",
+        f"@{content_path.name}",
+        "--json",
+    ]
+    if args.dry_run:
+        cmd.append("--dry-run")
+    result = run_lark(cmd, profile=args.profile, cwd=content_path.parent, check=False)
+    return {
+        "ok": result["returncode"] == 0,
+        "cmd": result["cmd"],
+        "returncode": result["returncode"],
+        "stdout": result["stdout"],
+        "stderr": result["stderr"],
+        "payload": result.get("json"),
+    }
+
+
+def clone_wiki_subtree(args: argparse.Namespace) -> dict[str, Any]:
+    output_dir = make_output_dir(args.doc + "-wiki-tree")
+    env = check_environment(args.profile)
+    ok, reason = has_usable_profile(env)
+    if not ok and not args.allow_stale_token:
+        raise CloneError(reason)
+    write_json(output_dir / "environment.json", summarize_environment(env))
+
+    if args.wiki_native_copy:
+        if not args.yes and not args.dry_run:
+            raise CloneError("wiki +node-copy 是高风险写操作。请确认后添加 --yes，或改用默认递归重建。")
+        result = try_wiki_native_copy(args, output_dir)
+        write_json(output_dir / "result.json", result)
+        if not result.get("ok"):
+            raise CloneError(result.get("stderr") or result.get("stdout") or "Wiki 原生复制失败。")
+        return result
+
+    source_get = run_lark(["wiki", "+node-get", "--as", "user", "--node-token", args.doc, "--json"], profile=args.profile)
+    source_payload = source_get.get("json")
+    source_node = extract_wiki_node(source_payload)
+    write_json(output_dir / "wiki-source-node.json", source_payload or {"stdout": source_get["stdout"], "stderr": source_get["stderr"]})
+    if not source_node.get("node_token") or not source_node.get("space_id"):
+        raise CloneError("无法解析源 Wiki node_token/space_id。")
+
+    results: list[dict[str, Any]] = []
+
+    def recurse(node: dict[str, Any], parent_target: str | None, depth: int) -> dict[str, Any]:
+        if depth > args.wiki_max_depth:
+            return {"ok": False, "source_node": node, "skipped": True, "reason": "超过 --wiki-max-depth"}
+        node_dir = output_dir / f"{len(results) + 1:03d}-{slugify(str(node.get('title') or node.get('node_token')))}"
+        node_dir.mkdir(parents=True, exist_ok=True)
+        source_doc = node.get("url") or node.get("obj_token") or node.get("node_token")
+        title, _clone_xml, warnings, diagnostics = fetch_normalized_content_for_doc(str(source_doc), args, node_dir)
+        target_node = create_wiki_doc_node(title, args, parent_target)
+        update = overwrite_wiki_node_content(target_node, node_dir / "content.clone.xml", args)
+        item_result = {
+            "ok": update.get("ok"),
+            "source_node": node,
+            "target_node": target_node,
+            "output_dir": str(node_dir),
+            "warnings": warnings,
+            "block_report": diagnostics,
+            "update": update,
+        }
+        results.append(item_result)
+
+        if depth < args.wiki_max_depth:
+            children_result = run_lark(
+                [
+                    "wiki",
+                    "+node-list",
+                    "--as",
+                    "user",
+                    "--space-id",
+                    str(node["space_id"]),
+                    "--parent-node-token",
+                    str(node["node_token"]),
+                    "--page-all",
+                    "--json",
+                ],
+                profile=args.profile,
+                check=False,
+            )
+            write_json(node_dir / "children.json", children_result.get("json") or {"stdout": children_result["stdout"], "stderr": children_result["stderr"]})
+            if children_result["returncode"] == 0:
+                for child in extract_wiki_items(children_result.get("json")):
+                    child["space_id"] = child.get("space_id") or node.get("space_id")
+                    recurse(child, target_node.get("node_token"), depth + 1)
+        return item_result
+
+    root = recurse(source_node, args.wiki_target_parent_node_token, 0)
+    summary = {
+        "ok": all(item.get("ok") for item in results),
+        "mode": "wiki-recursive-rebuild",
+        "source": args.doc,
+        "root": root,
+        "count": len(results),
+        "output_dir": str(output_dir),
+        "results": results,
+    }
+    write_json(output_dir / "result.json", summary)
+    return summary
+
+
 def load_config() -> dict[str, Any]:
     if not CONFIG_PATH.exists():
         return {}
@@ -411,7 +862,11 @@ def extract_title(inspect_payload: dict[str, Any], document: dict[str, Any], suf
     return base
 
 
-def normalize_xml(content: str, degrade_unsupported: bool = False) -> tuple[str, list[str], dict[str, Any]]:
+def normalize_xml(
+    content: str,
+    degrade_unsupported: bool = False,
+    reinsert_media: bool = False,
+) -> tuple[str, list[str], dict[str, Any]]:
     warnings: list[str] = []
     xml = content.strip()
     diagnostics = analyze_blocks(xml)
@@ -444,6 +899,10 @@ def normalize_xml(content: str, degrade_unsupported: bool = False) -> tuple[str,
     if diagnostics["unknown_tags"]:
         unknown_text = ", ".join(f"<{item['tag']}>×{item['count']}" for item in diagnostics["unknown_tags"][:20])
         warnings.append(f"检测到未登记标签：{unknown_text}。请人工检查保真度。")
+
+    if reinsert_media and diagnostics["media_assets"]:
+        xml = replace_media_with_anchors(xml, diagnostics["media_assets"])
+        warnings.append("已将媒体块替换为锚点，创建后会尝试把下载的图片/附件插回锚点位置。")
 
     if degrade_unsupported:
         xml, degraded_warnings = degrade_unsupported_blocks(xml)
@@ -479,6 +938,35 @@ def clone_doc(args: argparse.Namespace) -> dict[str, Any]:
 
     inspect = run_lark(["drive", "+inspect", "--url", args.doc, "--json"], profile=args.profile)
     write_json(output_dir / "inspect.json", inspect.get("json") or {"stdout": inspect["stdout"], "stderr": inspect["stderr"]})
+    inspect_payload = inspect.get("json") if isinstance(inspect.get("json"), dict) else {}
+    pre_title = args.title or extract_title(inspect_payload, {"content": ""}, args.title_suffix)
+
+    if args.mode in {"auto", "copy"}:
+        copy_result = try_drive_copy(
+            args.doc,
+            pre_title,
+            inspect_payload,
+            parent_target,
+            profile=args.profile,
+            dry_run=args.dry_run,
+        )
+        write_json(output_dir / "copy.json", copy_result)
+        if copy_result.get("ok"):
+            result = {
+                "ok": True,
+                "mode": "copy",
+                "source": args.doc,
+                "title": pre_title,
+                "url": copy_result.get("url"),
+                "target": parent_target,
+                "output_dir": str(output_dir),
+                "copy": copy_result,
+                "warnings": [],
+            }
+            write_json(output_dir / "result.json", result)
+            return result
+        if args.mode == "copy":
+            raise CloneError(f"Drive copy 失败：{copy_result.get('reason') or copy_result.get('stderr') or copy_result.get('stdout')}")
 
     fetch = run_lark(
         [
@@ -507,13 +995,17 @@ def clone_doc(args: argparse.Namespace) -> dict[str, Any]:
     raw_xml = document["content"]
     (output_dir / "content.raw.xml").write_text(raw_xml, encoding="utf-8")
 
-    clone_xml, warnings, diagnostics = normalize_xml(raw_xml, degrade_unsupported=args.degrade_unsupported)
+    clone_xml, warnings, diagnostics = normalize_xml(
+        raw_xml,
+        degrade_unsupported=args.degrade_unsupported,
+        reinsert_media=args.reinsert_media,
+    )
     content_path = output_dir / "content.clone.xml"
     content_path.write_text(clone_xml, encoding="utf-8")
     write_json(output_dir / "block-report.json", diagnostics)
 
     media_assets = diagnostics.get("media_assets", [])
-    if args.download_media and isinstance(media_assets, list):
+    if (args.download_media or args.reinsert_media) and isinstance(media_assets, list):
         media_assets = download_media_assets(media_assets, output_dir, profile=args.profile, dry_run=args.dry_run)
         diagnostics["media_assets"] = media_assets
         write_json(output_dir / "block-report.json", diagnostics)
@@ -579,6 +1071,20 @@ def clone_doc(args: argparse.Namespace) -> dict[str, Any]:
         if isinstance(create_warnings, list):
             warnings.extend(str(item) for item in create_warnings)
 
+    media_insert_operations: list[dict[str, Any]] = []
+    if args.reinsert_media and new_url:
+        media_insert_operations = insert_downloaded_media(
+            new_url,
+            media_assets if isinstance(media_assets, list) else [],
+            profile=args.profile,
+            dry_run=args.dry_run,
+            cleanup_anchor=not args.keep_media_anchors,
+        )
+        write_json(output_dir / "media-insert.json", media_insert_operations)
+        diagnostics["media_assets"] = media_assets
+        write_json(output_dir / "block-report.json", diagnostics)
+        write_json(output_dir / "media-manifest.json", media_assets)
+
     result = {
         "ok": bool(new_url) or args.dry_run,
         "mode": "rebuild",
@@ -591,6 +1097,8 @@ def clone_doc(args: argparse.Namespace) -> dict[str, Any]:
         "block_report_path": str(output_dir / "block-report.json"),
         "media_manifest_path": str(output_dir / "media-manifest.json"),
         "block_report": diagnostics,
+        "media_insert_path": str(output_dir / "media-insert.json") if args.reinsert_media else None,
+        "media_insert_operations": media_insert_operations,
         "warnings": warnings,
     }
     write_json(output_dir / "result.json", result)
@@ -616,8 +1124,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--parent-token", help="Target folder token or wiki parent node token.")
     parser.add_argument("--title", help="Override new document title.")
     parser.add_argument("--title-suffix", default=" - clone", help="Suffix appended to source title.")
+    parser.add_argument("--mode", choices=["auto", "copy", "rebuild"], default="auto", help="Clone strategy: try Drive copy first, force copy, or force rebuild.")
     parser.add_argument("--download-media", action="store_true", help="Download media/file tokens found in XML into the output media directory.")
+    parser.add_argument("--reinsert-media", action="store_true", help="Replace media tags with anchors, then insert downloaded images/files back near those anchors after document creation.")
+    parser.add_argument("--keep-media-anchors", action="store_true", help="Keep media anchor text after --reinsert-media instead of deleting it.")
     parser.add_argument("--degrade-unsupported", action="store_true", help="Replace known unsupported resource blocks with text placeholders.")
+    parser.add_argument("--wiki-recursive", action="store_true", help="Recursively clone a Wiki node tree by rebuilding each docx node.")
+    parser.add_argument("--wiki-native-copy", action="store_true", help="Use lark-cli wiki +node-copy instead of rebuild recursion. Requires --yes unless --dry-run.")
+    parser.add_argument("--wiki-target-space-id", help="Target Wiki space ID for recursive or native Wiki copy. Defaults to my_library.")
+    parser.add_argument("--wiki-target-parent-node-token", help="Target parent Wiki node token for recursive or native Wiki copy.")
+    parser.add_argument("--wiki-max-depth", type=int, default=20, help="Maximum depth for --wiki-recursive rebuild.")
+    parser.add_argument("--yes", action="store_true", help="Confirm high-risk operations such as native Wiki node copy.")
     parser.add_argument("--continue-on-error", action="store_true", help="Continue batch cloning after a document fails.")
     parser.add_argument("--fetch-only", action="store_true", help="Fetch and normalize only; do not create a new document.")
     parser.add_argument("--dry-run", action="store_true", help="Pass --dry-run to the create call.")
@@ -681,7 +1198,12 @@ def main() -> int:
         print(install_help_text())
         return 0
     try:
-        result = clone_batch(args) if args.docs_file else clone_doc(args)
+        if args.docs_file:
+            result = clone_batch(args)
+        elif args.wiki_recursive or args.wiki_native_copy:
+            result = clone_wiki_subtree(args)
+        else:
+            result = clone_doc(args)
     except CloneError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
         return 1

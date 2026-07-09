@@ -18,6 +18,9 @@
 - 生成块类型报告和媒体清单
 - 支持批量链接处理
 - 支持高风险块降级占位
+- 支持 Drive 直接 copy，失败后自动 rebuild
+- 支持下载后按锚点插回图片和附件
+- 支持 Wiki 树递归复刻
 - 依赖本机已登录的 `lark-cli`
 
 ## 适合谁
@@ -120,11 +123,50 @@ python scripts\clone_lark_doc.py "https://example.feishu.cn/docx/xxxx" --fetch-o
 python scripts\clone_lark_doc.py "https://example.feishu.cn/docx/xxxx" --download-media
 ```
 
+下载后按原位置锚点插回图片和附件：
+
+```powershell
+python scripts\clone_lark_doc.py "https://example.feishu.cn/docx/xxxx" --reinsert-media
+```
+
+这会先把媒体块替换成唯一锚点，创建文档后用 `docs +media-insert` 插到锚点附近，然后尝试删除锚点文字。
+
 把 Base、画板、同步块等高风险块降级成文本占位：
 
 ```powershell
 python scripts\clone_lark_doc.py "https://example.feishu.cn/docx/xxxx" --degrade-unsupported
 ```
+
+强制只走重建，不尝试 Drive copy：
+
+```powershell
+python scripts\clone_lark_doc.py "https://example.feishu.cn/docx/xxxx" --mode rebuild
+```
+
+只尝试 Drive copy：
+
+```powershell
+python scripts\clone_lark_doc.py "https://example.feishu.cn/docx/xxxx" --mode copy --parent-token "folder_token"
+```
+
+说明：Drive copy 需要目标文件夹 token。默认云盘根目录没有稳定 folder token 时，会自动跳过 copy，继续 rebuild。
+
+递归复刻 Wiki 树：
+
+```powershell
+python scripts\clone_lark_doc.py "https://example.feishu.cn/wiki/xxxx" --wiki-recursive
+```
+
+递归复刻会在目标 Wiki 空间创建节点，再把每个 docx 节点正文写入。
+默认目标是 `my_library`。
+
+使用飞书原生 Wiki 节点复制：
+
+```powershell
+python scripts\clone_lark_doc.py "https://example.feishu.cn/wiki/xxxx" --wiki-native-copy --yes
+```
+
+这是高风险写操作，必须显式传 `--yes`。
 
 也可以写入配置文件：
 
@@ -169,12 +211,14 @@ C:\Users\<你的用户名>\.agents\lark-doc-cloner.config.json
 - 块类型扫描：输出 `block-report.json`
 - 图片和附件清单：输出 `media-manifest.json`
 - 图片和附件下载：`--download-media`
+- 图片和附件锚点插回：`--reinsert-media`
 - 批量链接处理：`--docs-file`
 - 失败块降级：`--degrade-unsupported`
+- Drive copy 回退 rebuild：`--mode auto`
+- Wiki 树递归复刻：`--wiki-recursive`
 
 仍适合继续二开的方向：
 
-- 把已下载的图片和附件重新插回原位置
 - 为更多飞书块补充精确 XML 映射
 - 把表格、Base、画板做成专用复制链路
 - 为样式差异增加自动对比报告

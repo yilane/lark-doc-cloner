@@ -12,6 +12,7 @@ description: 用于复刻飞书/飞书 Wiki 文档到用户自己的飞书账号
 - 只需要原文档“可查看”权限，不要求编辑权限。
 - 不绕过飞书权限。打不开的文档不能复刻。
 - 默认走“读取 XML → 清洗 → 新建文档”的重建链路。
+- 默认 `--mode auto`：能 Drive 直接 copy 时先 copy，失败或缺目标 folder token 时回退 rebuild。
 - 复刻目标是尽量保留标题、段落、列表、表格、图片、附件、代码块、引用等结构。
 - 保真失败时要给出 warning，而不是假装完整。
 - 每次输出 `block-report.json` 和 `media-manifest.json`，方便检查块类型、图片、附件和降级项。
@@ -123,10 +124,20 @@ python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
   --doc "飞书文档链接" \
   --download-media
 
+# 下载后按媒体锚点插回原位置附近
+python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
+  --doc "飞书文档链接" \
+  --reinsert-media
+
 # 遇到 Base、画板、同步块等高风险块时降级为文本占位
 python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
   --doc "飞书文档链接" \
   --degrade-unsupported
+
+# 递归复刻 Wiki 树
+python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
+  --doc "飞书 Wiki 链接" \
+  --wiki-recursive
 ```
 
 ## 工作流
@@ -134,22 +145,28 @@ python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
 1. 检查 `lark-cli`。
 2. 读取 profile 和身份。
 3. 用 `drive +inspect` 获取文档类型、标题和 token。
-4. 用 `docs +fetch --detail full --doc-format xml` 读取完整 XML。
-5. 保存原始 JSON 和 XML。
-6. 扫描块类型和资源：
+4. 默认先尝试 Drive copy：
+   - 只有目标是 `--parent-token` 时才具备稳定 folder token。
+   - copy 成功直接返回新文档。
+   - copy 失败、缺 folder token 或用户传 `--mode rebuild` 时继续 rebuild。
+5. 用 `docs +fetch --detail full --doc-format xml` 读取完整 XML。
+6. 保存原始 JSON 和 XML。
+7. 扫描块类型和资源：
    - 输出 `block-report.json`。
    - 输出 `media-manifest.json`。
    - 对未知标签和高风险资源块给 warning。
-7. 清洗 XML：
+8. 清洗 XML：
    - 移除旧 block id。
    - 尽量把图片 URL 转成可新建的 `href`。
    - 用户传 `--degrade-unsupported` 时，把高风险资源块替换为文本占位。
+   - 用户传 `--reinsert-media` 时，把媒体块替换为唯一锚点。
    - 保留正文结构。
    - 保留 reference_map。
-8. 用户传 `--download-media` 时，下载可识别 token 的图片和附件到 `media/`。
-9. 用 `docs +create --content @file` 新建文档。
-10. 输出新文档 URL。
-11. 输出 warning 和中间产物路径。
+9. 用户传 `--download-media` 或 `--reinsert-media` 时，下载可识别 token 的图片和附件到 `media/`。
+10. 用 `docs +create --content @file` 新建文档。
+11. 用户传 `--reinsert-media` 时，用 `docs +media-insert` 插回锚点附近，并尝试删除锚点文字。
+12. 输出新文档 URL。
+13. 输出 warning 和中间产物路径。
 
 ## 成功输出
 
@@ -203,7 +220,21 @@ python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
 
 看到 `<sheet>`、`<bitable>`、`<base>`、`<whiteboard>`、`<mindnote>`、`<synced_reference>`、`<task>`、`<okr>` 等标签时，要提醒用户人工检查。
 如果用户愿意接受占位式保真，使用 `--degrade-unsupported`。
-如果用户需要素材落地，使用 `--download-media`，但要说明当前版本只负责下载和记录，尚未把附件重新插回原位置。
+如果用户需要素材落地，使用 `--download-media`。
+如果用户明确要把图片/附件插回原位置，使用 `--reinsert-media`；它通过文本锚点插回原位置附近，若锚点清理失败会在 `media-insert.json` 里记录。
+
+## Wiki 树
+
+用户要复刻整个 Wiki 树时，使用 `--wiki-recursive`。
+默认会递归重建每个 docx 节点，并写到目标 `my_library`。
+
+如果用户明确接受飞书原生 Wiki copy，高风险写入需使用：
+
+```bash
+--wiki-native-copy --yes
+```
+
+不要在用户未确认时擅自给 `wiki +node-copy` 加 `--yes`。
 
 ## 可二开说明
 
@@ -218,7 +249,6 @@ python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
 后续增强方向：
 
 - 先尝试 Drive 直接 copy，失败再重建。
-- 把已下载的图片和附件重新插回原位置。
 - 对 Wiki 树做递归复刻。
 - 增加本地 FastAPI helper 和进度接口。
 - 把任务状态持久化到 SQLite。
