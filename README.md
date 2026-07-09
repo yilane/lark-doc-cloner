@@ -137,7 +137,6 @@ C:\Users\<你的用户名>\.agents\lark-doc-cloner.config.json
 先读 [技术实现文档](references/technical-design.md)。
 那里写了完整流程。
 
-## 开源说明
+## License
 
-目前仓库没有绑定特定许可证。
-如果你要公开分发或商用，请先补充许可证。
+MIT License.
