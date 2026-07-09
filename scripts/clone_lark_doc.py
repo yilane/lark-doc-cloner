@@ -21,9 +21,10 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_PARENT_POSITION = "my_library"
+DEFAULT_PARENT_TARGET = "drive_root"
 OUTPUT_ROOT = Path(os.environ.get("LARK_DOC_CLONER_OUTPUT_ROOT", Path(tempfile.gettempdir()) / "LarkDocCloner"))
 INSTALL_GUIDE_URL = "https://open.feishu.cn/document/no_class/mcp-archive/feishu-cli-installation-guide.md"
+CONFIG_PATH = Path(os.environ.get("LARK_DOC_CLONER_CONFIG", Path.home() / ".agents" / "lark-doc-cloner.config.json"))
 
 
 class CloneError(RuntimeError):
@@ -141,6 +142,41 @@ def write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def load_config() -> dict[str, Any]:
+    if not CONFIG_PATH.exists():
+        return {}
+    try:
+        payload = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CloneError(f"配置文件读取失败：{CONFIG_PATH} ({exc})")
+    if not isinstance(payload, dict):
+        raise CloneError(f"配置文件必须是 JSON object：{CONFIG_PATH}")
+    return payload
+
+
+def resolve_parent_target(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, str]:
+    cli_token = (args.parent_token or "").strip()
+    cli_position = (args.parent_position or "").strip()
+    env_token = (os.environ.get("LARK_DOC_CLONER_PARENT_TOKEN") or "").strip()
+    env_position = (os.environ.get("LARK_DOC_CLONER_PARENT_POSITION") or "").strip()
+    config_token = str(config.get("parent_token") or "").strip()
+    config_position = str(config.get("parent_position") or "").strip()
+
+    if cli_token:
+        return {"type": "parent-token", "value": cli_token, "source": "cli"}
+    if cli_position:
+        return {"type": "parent-position", "value": cli_position, "source": "cli"}
+    if env_token:
+        return {"type": "parent-token", "value": env_token, "source": "env:LARK_DOC_CLONER_PARENT_TOKEN"}
+    if config_token:
+        return {"type": "parent-token", "value": config_token, "source": str(CONFIG_PATH)}
+    if env_position:
+        return {"type": "parent-position", "value": env_position, "source": "env:LARK_DOC_CLONER_PARENT_POSITION"}
+    if config_position:
+        return {"type": "parent-position", "value": config_position, "source": str(CONFIG_PATH)}
+    return {"type": "drive-root", "value": DEFAULT_PARENT_TARGET, "source": "default"}
+
+
 def extract_document(fetch_payload: dict[str, Any]) -> dict[str, Any]:
     data = fetch_payload.get("data") if isinstance(fetch_payload, dict) else None
     document = data.get("document") if isinstance(data, dict) else None
@@ -221,6 +257,7 @@ def normalize_xml(content: str) -> tuple[str, list[str]]:
 
 
 def clone_doc(args: argparse.Namespace) -> dict[str, Any]:
+    config = load_config()
     env = check_environment(args.profile)
     ok, reason = has_usable_profile(env)
     if not ok and not args.allow_stale_token:
@@ -233,6 +270,7 @@ def clone_doc(args: argparse.Namespace) -> dict[str, Any]:
 
     output_dir = make_output_dir(args.doc)
     write_json(output_dir / "environment.json", summarize_environment(env))
+    parent_target = resolve_parent_target(args, config)
 
     inspect = run_lark(["drive", "+inspect", "--url", args.doc, "--json"], profile=args.profile)
     write_json(output_dir / "inspect.json", inspect.get("json") or {"stdout": inspect["stdout"], "stderr": inspect["stderr"]})
@@ -303,10 +341,10 @@ def clone_doc(args: argparse.Namespace) -> dict[str, Any]:
     ]
     if reference_map_path:
         create_cmd.extend(["--reference-map", "@reference-map.json"])
-    if args.parent_token:
-        create_cmd.extend(["--parent-token", args.parent_token])
-    elif args.parent_position:
-        create_cmd.extend(["--parent-position", args.parent_position])
+    if parent_target["type"] == "parent-token":
+        create_cmd.extend(["--parent-token", parent_target["value"]])
+    elif parent_target["type"] == "parent-position":
+        create_cmd.extend(["--parent-position", parent_target["value"]])
 
     if args.dry_run:
         create_cmd.append("--dry-run")
@@ -331,6 +369,7 @@ def clone_doc(args: argparse.Namespace) -> dict[str, Any]:
         "source": args.doc,
         "title": title,
         "url": new_url,
+        "target": parent_target,
         "output_dir": str(output_dir),
         "content_path": str(content_path),
         "warnings": warnings,
@@ -352,7 +391,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Clone a readable Lark/Feishu document into the current user's space.")
     parser.add_argument("--doc", help="Lark/Feishu document URL or token.")
     parser.add_argument("--profile", help="lark-cli profile name. Defaults to active profile.")
-    parser.add_argument("--parent-position", default=DEFAULT_PARENT_POSITION, help="Target position, e.g. my_library.")
+    parser.add_argument("--parent-position", help="Target position, e.g. my_library. Defaults to Drive root.")
     parser.add_argument("--parent-token", help="Target folder token or wiki parent node token.")
     parser.add_argument("--title", help="Override new document title.")
     parser.add_argument("--title-suffix", default=" - clone", help="Suffix appended to source title.")

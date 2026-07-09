@@ -88,7 +88,7 @@ lark-cli docs +create \
   --doc-format xml \
   --title "<title> - clone" \
   --content "@content.clone.xml" \
-  --parent-position my_library \
+  # 默认不传 parent-position，创建到云盘根目录
   --json
 ```
 

@@ -98,10 +98,9 @@ python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
   --doc "飞书文档链接" \
   --profile "cli_xxx"
 
-# 创建到“我的空间”
+# 默认创建到云盘根目录（https://my.feishu.cn/drive/me）
 python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
-  --doc "飞书文档链接" \
-  --parent-position my_library
+  --doc "飞书文档链接"
 
 # 创建到指定文件夹或 Wiki 节点
 python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \

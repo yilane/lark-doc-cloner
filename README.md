@@ -14,6 +14,7 @@
 - 没有编辑权限也能复制
 - 保留标题、段落和主要结构
 - 默认新标题后缀是 ` - clone`
+- 默认创建到云盘根目录 `https://my.feishu.cn/drive/me`
 - 依赖本机已登录的 `lark-cli`
 
 ## 适合谁
@@ -81,6 +82,26 @@ python scripts\clone_lark_doc.py --install-help
 
 ```powershell
 python scripts\clone_lark_doc.py "https://example.feishu.cn/docx/xxxx" --title-suffix " - backup"
+```
+
+指定固定文件夹：
+
+```powershell
+python scripts\clone_lark_doc.py "https://example.feishu.cn/docx/xxxx" --parent-token "folder_token"
+```
+
+也可以写入配置文件：
+
+```json
+{
+  "parent_token": "folder_token"
+}
+```
+
+配置文件默认位置：
+
+```text
+C:\Users\<你的用户名>\.agents\lark-doc-cloner.config.json
 ```
 
 ## 权限边界
