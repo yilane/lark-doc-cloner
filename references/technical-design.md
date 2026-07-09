@@ -88,9 +88,10 @@ lark-cli docs +create \
   --doc-format xml \
   --title "<title> - clone" \
   --content "@content.clone.xml" \
-  # 默认不传 parent-position，创建到云盘根目录
   --json
 ```
+
+默认不传 `parent-position`，让飞书创建到云盘根目录。
 
 ## 中间产物
 
