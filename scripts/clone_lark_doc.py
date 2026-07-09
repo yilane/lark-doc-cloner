@@ -25,6 +25,70 @@ DEFAULT_PARENT_TARGET = "drive_root"
 OUTPUT_ROOT = Path(os.environ.get("LARK_DOC_CLONER_OUTPUT_ROOT", Path(tempfile.gettempdir()) / "LarkDocCloner"))
 INSTALL_GUIDE_URL = "https://open.feishu.cn/document/no_class/mcp-archive/feishu-cli-installation-guide.md"
 CONFIG_PATH = Path(os.environ.get("LARK_DOC_CLONER_CONFIG", Path.home() / ".agents" / "lark-doc-cloner.config.json"))
+ATTR_RE = re.compile(r"""([A-Za-z_:\-][\w:.\-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
+
+KNOWN_STRUCTURE_TAGS = {
+    "doc",
+    "document",
+    "fragment",
+    "title",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "p",
+    "text",
+    "a",
+    "b",
+    "strong",
+    "i",
+    "em",
+    "u",
+    "s",
+    "code",
+    "codeblock",
+    "pre",
+    "blockquote",
+    "quote",
+    "callout",
+    "hr",
+    "br",
+    "ul",
+    "ol",
+    "li",
+    "todo",
+    "table",
+    "thead",
+    "tbody",
+    "tr",
+    "td",
+    "th",
+    "img",
+    "image",
+    "source",
+    "file",
+    "attachment",
+    "mention",
+    "docs_link",
+}
+
+RISKY_BLOCKS: dict[str, dict[str, str]] = {
+    "sheet": {"level": "degraded", "reason": "电子表格资源块通常只能保留引用，不能完整重建表内数据。"},
+    "bitable": {"level": "degraded", "reason": "多维表格/Base 需要单独接口复制，XML 重建只能降级。"},
+    "base": {"level": "degraded", "reason": "Base 资源块需要单独接口复制，XML 重建只能降级。"},
+    "whiteboard": {"level": "degraded", "reason": "画板需要单独下载或重建，XML 创建不保证保真。"},
+    "mindnote": {"level": "degraded", "reason": "思维笔记资源需要专门接口处理。"},
+    "synced_reference": {"level": "degraded", "reason": "同步块引用依赖源块权限和关系，不能直接复用。"},
+    "synced_source": {"level": "degraded", "reason": "同步块源关系不能直接复制到新文档。"},
+    "task": {"level": "degraded", "reason": "任务块通常依赖任务系统，重建后需要人工检查。"},
+    "okr": {"level": "degraded", "reason": "OKR 块依赖 OKR 系统，重建后需要人工检查。"},
+    "slides": {"level": "degraded", "reason": "幻灯片资源需要单独复制或导入。"},
+    "wiki": {"level": "check", "reason": "Wiki 引用可能只保留链接，不复制树结构。"},
+}
+
+MEDIA_TAGS = {"img", "image", "source", "file", "attachment"}
 
 
 class CloneError(RuntimeError):
@@ -142,6 +206,140 @@ def write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def parse_attrs(tag: str) -> dict[str, str]:
+    attrs: dict[str, str] = {}
+    for match in ATTR_RE.finditer(tag):
+        attrs[match.group(1)] = match.group(2) if match.group(2) is not None else match.group(3) or ""
+    return attrs
+
+
+def count_tags(xml: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for match in re.finditer(r"<\s*([A-Za-z][\w:.-]*)\b", xml):
+        tag = match.group(1).split(":")[-1].lower()
+        counts[tag] = counts.get(tag, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def collect_media_assets(xml: str) -> list[dict[str, Any]]:
+    assets: list[dict[str, Any]] = []
+    for match in re.finditer(r"<\s*([A-Za-z][\w:.-]*)\b[^>]*?/?>", xml, flags=re.S):
+        tag_name = match.group(1).split(":")[-1].lower()
+        if tag_name not in MEDIA_TAGS:
+            continue
+        attrs = parse_attrs(match.group(0))
+        token = (
+            attrs.get("token")
+            or attrs.get("file_token")
+            or attrs.get("media_token")
+            or attrs.get("block_token")
+            or attrs.get("id")
+        )
+        url = attrs.get("href") or attrs.get("url") or attrs.get("src")
+        asset_type = "image" if tag_name in {"img", "image"} else "file"
+        assets.append(
+            {
+                "index": len(assets) + 1,
+                "tag": tag_name,
+                "type": asset_type,
+                "token": token,
+                "url": url,
+                "name": attrs.get("name") or attrs.get("filename") or attrs.get("title"),
+                "downloaded": False,
+                "download_path": None,
+                "status": "pending" if token else ("url-only" if url else "missing-token-and-url"),
+            }
+        )
+    return assets
+
+
+def analyze_blocks(xml: str) -> dict[str, Any]:
+    tag_counts = count_tags(xml)
+    risky: list[dict[str, Any]] = []
+    for tag, meta in RISKY_BLOCKS.items():
+        count = tag_counts.get(tag, 0)
+        if count:
+            risky.append({"tag": tag, "count": count, **meta})
+
+    unknown = [
+        {"tag": tag, "count": count}
+        for tag, count in tag_counts.items()
+        if tag not in KNOWN_STRUCTURE_TAGS and tag not in RISKY_BLOCKS
+    ]
+    return {
+        "tag_counts": tag_counts,
+        "risky_blocks": risky,
+        "unknown_tags": unknown,
+        "media_assets": collect_media_assets(xml),
+    }
+
+
+def placeholder_for_block(tag: str) -> str:
+    reason = RISKY_BLOCKS.get(tag, {}).get("reason", "该资源块暂未支持自动重建。")
+    return f"<p>[未自动复刻：{tag} 资源块。{reason}]</p>"
+
+
+def degrade_unsupported_blocks(xml: str) -> tuple[str, list[str]]:
+    degraded: list[str] = []
+    for tag in RISKY_BLOCKS:
+        paired = re.compile(rf"<{tag}\b[^>]*>.*?</{tag}>", flags=re.S | re.I)
+        self_closing = re.compile(rf"<{tag}\b[^>]*/>", flags=re.S | re.I)
+        xml, paired_count = paired.subn(placeholder_for_block(tag), xml)
+        xml, self_count = self_closing.subn(placeholder_for_block(tag), xml)
+        count = paired_count + self_count
+        if count:
+            degraded.append(f"已将 {count} 个 <{tag}> 资源块降级为文本占位。")
+    return xml, degraded
+
+
+def download_media_assets(
+    assets: list[dict[str, Any]],
+    output_dir: Path,
+    profile: str | None = None,
+    dry_run: bool = False,
+) -> list[dict[str, Any]]:
+    media_dir = output_dir / "media"
+    media_dir.mkdir(exist_ok=True)
+    for asset in assets:
+        token = asset.get("token")
+        if not token:
+            continue
+        safe_name = slugify(str(asset.get("name") or asset.get("tag") or asset["type"]))
+        output = media_dir / f"{asset['index']:03d}-{safe_name}"
+        args = [
+            "docs",
+            "+media-download",
+            "--token",
+            str(token),
+            "--type",
+            "media",
+            "--output",
+            str(output),
+            "--overwrite",
+            "--json",
+        ]
+        if dry_run:
+            args.append("--dry-run")
+        result = run_lark(args, profile=profile, check=False)
+        asset["download_command"] = result["cmd"]
+        asset["download_returncode"] = result["returncode"]
+        if result["returncode"] == 0:
+            payload = result.get("json")
+            saved_path = None
+            if isinstance(payload, dict):
+                data = payload.get("data")
+                if isinstance(data, dict):
+                    saved_path = data.get("path") or data.get("output") or data.get("file")
+                saved_path = saved_path or payload.get("path") or payload.get("output") or payload.get("file_path")
+            asset["downloaded"] = True
+            asset["download_path"] = str(saved_path or output)
+            asset["status"] = "downloaded" if not dry_run else "download-dry-run"
+        else:
+            asset["status"] = "download-failed"
+            asset["download_error"] = result["stderr"] or result["stdout"]
+    return assets
+
+
 def load_config() -> dict[str, Any]:
     if not CONFIG_PATH.exists():
         return {}
@@ -213,9 +411,10 @@ def extract_title(inspect_payload: dict[str, Any], document: dict[str, Any], suf
     return base
 
 
-def normalize_xml(content: str) -> tuple[str, list[str]]:
+def normalize_xml(content: str, degrade_unsupported: bool = False) -> tuple[str, list[str], dict[str, Any]]:
     warnings: list[str] = []
     xml = content.strip()
+    diagnostics = analyze_blocks(xml)
 
     # Block IDs belong to the source document. Reusing them in a new document is
     # noisy at best and invalid at worst.
@@ -240,10 +439,15 @@ def normalize_xml(content: str) -> tuple[str, list[str]]:
 
     xml = re.sub(r"<img\b[^>]*?/?>", img_rewrite, xml, flags=re.I)
 
-    risky_tags = ["sheet", "bitable", "whiteboard", "synced_reference", "synced_source", "task", "okr"]
-    for tag in risky_tags:
-        if re.search(rf"<{tag}\b", xml, flags=re.I):
-            warnings.append(f"检测到 <{tag}> 资源块，新文档中可能需要人工检查。")
+    for item in diagnostics["risky_blocks"]:
+        warnings.append(f"检测到 {item['count']} 个 <{item['tag']}> 资源块：{item['reason']}")
+    if diagnostics["unknown_tags"]:
+        unknown_text = ", ".join(f"<{item['tag']}>×{item['count']}" for item in diagnostics["unknown_tags"][:20])
+        warnings.append(f"检测到未登记标签：{unknown_text}。请人工检查保真度。")
+
+    if degrade_unsupported:
+        xml, degraded_warnings = degrade_unsupported_blocks(xml)
+        warnings.extend(degraded_warnings)
 
     if "<title" not in xml.lower():
         warnings.append("原始 XML 没有 <title>，将使用 inspect 或默认标题创建。")
@@ -253,7 +457,8 @@ def normalize_xml(content: str) -> tuple[str, list[str]]:
         # keep the effective title in the command argument.
         xml = re.sub(r"<title\b[^>]*>.*?</title>", "", xml, flags=re.S | re.I).strip()
 
-    return xml + "\n", warnings
+    diagnostics["warnings"] = warnings
+    return xml + "\n", warnings, diagnostics
 
 
 def clone_doc(args: argparse.Namespace) -> dict[str, Any]:
@@ -302,9 +507,17 @@ def clone_doc(args: argparse.Namespace) -> dict[str, Any]:
     raw_xml = document["content"]
     (output_dir / "content.raw.xml").write_text(raw_xml, encoding="utf-8")
 
-    clone_xml, warnings = normalize_xml(raw_xml)
+    clone_xml, warnings, diagnostics = normalize_xml(raw_xml, degrade_unsupported=args.degrade_unsupported)
     content_path = output_dir / "content.clone.xml"
     content_path.write_text(clone_xml, encoding="utf-8")
+    write_json(output_dir / "block-report.json", diagnostics)
+
+    media_assets = diagnostics.get("media_assets", [])
+    if args.download_media and isinstance(media_assets, list):
+        media_assets = download_media_assets(media_assets, output_dir, profile=args.profile, dry_run=args.dry_run)
+        diagnostics["media_assets"] = media_assets
+        write_json(output_dir / "block-report.json", diagnostics)
+    write_json(output_dir / "media-manifest.json", media_assets)
 
     reference_map = document.get("reference_map")
     reference_map_path = None
@@ -321,6 +534,9 @@ def clone_doc(args: argparse.Namespace) -> dict[str, Any]:
             "title": title,
             "output_dir": str(output_dir),
             "content_path": str(content_path),
+            "block_report_path": str(output_dir / "block-report.json"),
+            "media_manifest_path": str(output_dir / "media-manifest.json"),
+            "block_report": diagnostics,
             "warnings": warnings,
         }
         write_json(output_dir / "result.json", result)
@@ -372,6 +588,9 @@ def clone_doc(args: argparse.Namespace) -> dict[str, Any]:
         "target": parent_target,
         "output_dir": str(output_dir),
         "content_path": str(content_path),
+        "block_report_path": str(output_dir / "block-report.json"),
+        "media_manifest_path": str(output_dir / "media-manifest.json"),
+        "block_report": diagnostics,
         "warnings": warnings,
     }
     write_json(output_dir / "result.json", result)
@@ -389,12 +608,17 @@ def summarize_environment(env: dict[str, Any]) -> dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Clone a readable Lark/Feishu document into the current user's space.")
+    parser.add_argument("doc_arg", nargs="?", help="Optional positional Lark/Feishu document URL or token.")
     parser.add_argument("--doc", help="Lark/Feishu document URL or token.")
+    parser.add_argument("--docs-file", help="Text file containing one Lark/Feishu document URL per line for batch cloning.")
     parser.add_argument("--profile", help="lark-cli profile name. Defaults to active profile.")
     parser.add_argument("--parent-position", help="Target position, e.g. my_library. Defaults to Drive root.")
     parser.add_argument("--parent-token", help="Target folder token or wiki parent node token.")
     parser.add_argument("--title", help="Override new document title.")
     parser.add_argument("--title-suffix", default=" - clone", help="Suffix appended to source title.")
+    parser.add_argument("--download-media", action="store_true", help="Download media/file tokens found in XML into the output media directory.")
+    parser.add_argument("--degrade-unsupported", action="store_true", help="Replace known unsupported resource blocks with text placeholders.")
+    parser.add_argument("--continue-on-error", action="store_true", help="Continue batch cloning after a document fails.")
     parser.add_argument("--fetch-only", action="store_true", help="Fetch and normalize only; do not create a new document.")
     parser.add_argument("--dry-run", action="store_true", help="Pass --dry-run to the create call.")
     parser.add_argument("--check", action="store_true", help="Only check lark-cli and profile status.")
@@ -403,14 +627,61 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def read_docs_file(path: str) -> list[str]:
+    docs: list[str] = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        value = line.strip().lstrip("\ufeff")
+        if not value or value.startswith("#"):
+            continue
+        docs.append(value)
+    return docs
+
+
+def clone_batch(args: argparse.Namespace) -> dict[str, Any]:
+    docs = read_docs_file(args.docs_file)
+    if not docs:
+        raise CloneError(f"批量文件里没有可用链接：{args.docs_file}")
+    batch_dir = OUTPUT_ROOT / f"{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}-batch"
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    results: list[dict[str, Any]] = []
+    for index, doc in enumerate(docs, start=1):
+        item_args = argparse.Namespace(**vars(args))
+        item_args.doc = doc
+        item_args.docs_file = None
+        try:
+            result = clone_doc(item_args)
+            result["batch_index"] = index
+            results.append(result)
+        except CloneError as exc:
+            failure = {"ok": False, "batch_index": index, "source": doc, "error": str(exc)}
+            results.append(failure)
+            if not args.continue_on_error:
+                write_json(batch_dir / "batch-result.json", {"ok": False, "results": results})
+                raise
+    ok = all(item.get("ok") for item in results)
+    summary = {
+        "ok": ok,
+        "mode": "batch",
+        "count": len(results),
+        "success_count": sum(1 for item in results if item.get("ok")),
+        "failure_count": sum(1 for item in results if not item.get("ok")),
+        "output_dir": str(batch_dir),
+        "results": results,
+    }
+    write_json(batch_dir / "batch-result.json", summary)
+    return summary
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+    if not args.doc and args.doc_arg:
+        args.doc = args.doc_arg
     if args.install_help:
         print(install_help_text())
         return 0
     try:
-        result = clone_doc(args)
+        result = clone_batch(args) if args.docs_file else clone_doc(args)
     except CloneError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
         return 1

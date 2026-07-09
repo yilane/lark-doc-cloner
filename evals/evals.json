@@ -4,17 +4,32 @@
     {
       "id": 1,
       "prompt": "帮我把这个飞书文档复刻到我的飞书里：https://example.feishu.cn/docx/ExampleToken123",
-      "expected_output": "应该使用 lark-doc-cloner，说明需要 lark-cli 登录，调用脚本执行复刻，并返回新文档链接或清晰错误。"
+      "expected_output": "应该使用 lark-doc-cloner，说明需要 lark-cli 登录，执行复刻流程，并返回新文档链接、输出目录、block-report.json、media-manifest.json 或清晰错误。"
     },
     {
       "id": 2,
       "prompt": "这个文档我只有查看权限，不能编辑。能不能复制一份我自己的？https://example.feishu.cn/wiki/WikiToken123",
-      "expected_output": "应该说明不会绕过权限，只要能查看就通过 fetch + create 重建，并执行复刻流程。"
+      "expected_output": "应该说明不会绕过权限；只要能查看，就通过 fetch + create 重建，并提示 Wiki 链接会先 inspect 解包。"
     },
     {
       "id": 3,
       "prompt": "给我总结一下这个飞书文档：https://example.feishu.cn/docx/ExampleToken123",
       "expected_output": "不应该触发复刻流程；这是总结任务，不是复制或复刻。"
+    },
+    {
+      "id": 4,
+      "prompt": "我有一个 docs.txt，里面很多飞书链接。帮我批量 clone，失败的跳过继续。",
+      "expected_output": "应该使用 --docs-file docs.txt --continue-on-error，并说明批量结果会写入 batch-result.json。"
+    },
+    {
+      "id": 5,
+      "prompt": "这个飞书文档里有很多图片和附件，复刻时帮我把能下载的素材也落到本地。",
+      "expected_output": "应该使用 --download-media，说明会生成 media-manifest.json 和 media/ 目录；同时说明当前版本不承诺附件已插回原位置。"
+    },
+    {
+      "id": 6,
+      "prompt": "如果里面有 Base、画板、同步块，创建失败的话就用文字标出来，别直接卡死。",
+      "expected_output": "应该使用 --degrade-unsupported，并说明会把高风险块降级为文本占位，同时在 warnings 和 block-report.json 中记录。"
     }
   ]
 }

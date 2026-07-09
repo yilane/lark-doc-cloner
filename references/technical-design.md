@@ -104,6 +104,8 @@ fetch.json
 content.raw.xml
 content.clone.xml
 reference-map.json
+block-report.json
+media-manifest.json
 create.json
 result.json
 ```
@@ -114,6 +116,27 @@ result.json
 - 对比保真度。
 - 做二次开发。
 - 构造测试样本。
+
+### `block-report.json`
+
+记录：
+
+- 所有 XML 标签计数。
+- 高风险资源块，例如 Base、画板、同步块、任务、OKR。
+- 未登记标签。
+- 媒体和附件资源概览。
+- 本次 warning。
+
+### `media-manifest.json`
+
+记录 XML 中识别到的图片和附件：
+
+- 标签类型。
+- 资源 token。
+- URL / href。
+- 文件名。
+- 是否已下载。
+- 下载路径或失败原因。
 
 ## XML 清洗策略
 
@@ -136,13 +159,26 @@ id="..."
 
 - `<sheet>`
 - `<bitable>`
+- `<base>`
 - `<whiteboard>`
+- `<mindnote>`
 - `<synced_reference>`
 - `<synced_source>`
 - `<task>`
 - `<okr>`
+- `<slides>`
+- `<wiki>`
 
 这些会写入 warning。
+
+如果用户传 `--degrade-unsupported`，脚本会把已登记的高风险资源块替换成文本占位：
+
+```xml
+<p>[未自动复刻：bitable 资源块。多维表格/Base 需要单独接口复制，XML 重建只能降级。]</p>
+```
+
+这不是高保真复制。
+它的价值是让新文档可创建、可读，并明确标出损失位置。
 
 ## 保真边界
 
@@ -197,16 +233,48 @@ id="..."
 
 ### 2. 图片和附件显式搬运
 
-当前框架主要依赖 XML 中的 URL 或 token。
+当前框架已经会扫描 `<img>`、`<image>`、`<file>`、`<attachment>`。
 
-更强的方案：
+默认行为：
+
+1. 写入 `media-manifest.json`。
+2. 如果图片有 `url` 但没有 `href`，补充 `href`，交给 `docs +create` 尝试重建。
+
+用户传 `--download-media` 时：
+
+1. 对有 token 的媒体运行 `docs +media-download`。
+2. 保存到输出目录的 `media/`。
+3. 在 `media-manifest.json` 里记录下载状态。
+
+仍待二开的更强方案：
 
 1. 扫描 `<img>` 和 `<source>`。
 2. 用 `docs +media-download` 下载。
 3. 新建文档后用 `docs +media-insert` 插入。
-4. 更新 XML 或分块追加。
+4. 通过文本锚点或 block id 把媒体插回原位置。
+5. 对附件使用 `--type file` 和 `--file-view` 选择展示方式。
 
-### 3. Wiki 树复刻
+当前版本不会承诺“附件已完整插回原位”。
+它只完成“识别、记录、可选下载”。
+
+### 3. 批量链接处理
+
+使用：
+
+```bash
+python scripts/clone_lark_doc.py --docs-file docs.txt --continue-on-error
+```
+
+规则：
+
+- `docs.txt` 每行一个链接。
+- 空行跳过。
+- `#` 开头的行跳过。
+- 默认遇到错误停止。
+- 加 `--continue-on-error` 后继续处理后续链接。
+- 批量结果写入 `batch-result.json`。
+
+### 4. Wiki 树复刻
 
 当前脚本复刻单篇文档。
 
@@ -217,7 +285,7 @@ Wiki 树复刻需要：
 3. 对每个 docx 节点执行单篇复刻。
 4. 在目标 wiki 下重建层级。
 
-### 4. 本地 Helper 服务
+### 5. 本地 Helper 服务
 
 可加一个 FastAPI 服务：
 

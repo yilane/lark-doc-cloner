@@ -14,6 +14,7 @@ description: 用于复刻飞书/飞书 Wiki 文档到用户自己的飞书账号
 - 默认走“读取 XML → 清洗 → 新建文档”的重建链路。
 - 复刻目标是尽量保留标题、段落、列表、表格、图片、附件、代码块、引用等结构。
 - 保真失败时要给出 warning，而不是假装完整。
+- 每次输出 `block-report.json` 和 `media-manifest.json`，方便检查块类型、图片、附件和降级项。
 
 ## 什么时候使用
 
@@ -111,6 +112,21 @@ python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
 python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
   --doc "飞书文档链接" \
   --fetch-only
+
+# 批量复刻，每行一个链接
+python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
+  --docs-file "docs.txt" \
+  --continue-on-error
+
+# 下载可识别 token 的图片和附件到输出目录 media/
+python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
+  --doc "飞书文档链接" \
+  --download-media
+
+# 遇到 Base、画板、同步块等高风险块时降级为文本占位
+python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
+  --doc "飞书文档链接" \
+  --degrade-unsupported
 ```
 
 ## 工作流
@@ -120,14 +136,20 @@ python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
 3. 用 `drive +inspect` 获取文档类型、标题和 token。
 4. 用 `docs +fetch --detail full --doc-format xml` 读取完整 XML。
 5. 保存原始 JSON 和 XML。
-6. 清洗 XML：
+6. 扫描块类型和资源：
+   - 输出 `block-report.json`。
+   - 输出 `media-manifest.json`。
+   - 对未知标签和高风险资源块给 warning。
+7. 清洗 XML：
    - 移除旧 block id。
    - 尽量把图片 URL 转成可新建的 `href`。
+   - 用户传 `--degrade-unsupported` 时，把高风险资源块替换为文本占位。
    - 保留正文结构。
    - 保留 reference_map。
-7. 用 `docs +create --content @file` 新建文档。
-8. 输出新文档 URL。
-9. 输出 warning 和中间产物路径。
+8. 用户传 `--download-media` 时，下载可识别 token 的图片和附件到 `media/`。
+9. 用 `docs +create --content @file` 新建文档。
+10. 输出新文档 URL。
+11. 输出 warning 和中间产物路径。
 
 ## 成功输出
 
@@ -137,6 +159,7 @@ python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
 - 输出目录。
 - 是否有 warning。
 - 没有复制到的内容类型。
+- `block-report.json` 和 `media-manifest.json` 路径。
 
 示例：
 
@@ -178,7 +201,9 @@ python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
 - 原文档中的权限、评论、历史版本。
 - 某些附件或外部资源。
 
-看到 `<sheet>`、`<bitable>`、`<whiteboard>`、`<synced_reference>` 等标签时，要提醒用户人工检查。
+看到 `<sheet>`、`<bitable>`、`<base>`、`<whiteboard>`、`<mindnote>`、`<synced_reference>`、`<task>`、`<okr>` 等标签时，要提醒用户人工检查。
+如果用户愿意接受占位式保真，使用 `--degrade-unsupported`。
+如果用户需要素材落地，使用 `--download-media`，但要说明当前版本只负责下载和记录，尚未把附件重新插回原位置。
 
 ## 可二开说明
 
@@ -193,7 +218,7 @@ python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
 后续增强方向：
 
 - 先尝试 Drive 直接 copy，失败再重建。
-- 对图片和附件做显式下载再上传。
+- 把已下载的图片和附件重新插回原位置。
 - 对 Wiki 树做递归复刻。
 - 增加本地 FastAPI helper 和进度接口。
 - 把任务状态持久化到 SQLite。

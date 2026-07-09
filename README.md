@@ -15,6 +15,9 @@
 - 保留标题、段落和主要结构
 - 默认新标题后缀是 ` - clone`
 - 默认创建到云盘根目录 `https://my.feishu.cn/drive/me`
+- 生成块类型报告和媒体清单
+- 支持批量链接处理
+- 支持高风险块降级占位
 - 依赖本机已登录的 `lark-cli`
 
 ## 适合谁
@@ -72,6 +75,12 @@ https://example.feishu.cn/wiki/xxxx
 python scripts\clone_lark_doc.py "https://example.feishu.cn/docx/xxxx"
 ```
 
+等价写法：
+
+```powershell
+python scripts\clone_lark_doc.py --doc "https://example.feishu.cn/docx/xxxx"
+```
+
 查看安装帮助：
 
 ```powershell
@@ -88,6 +97,33 @@ python scripts\clone_lark_doc.py "https://example.feishu.cn/docx/xxxx" --title-s
 
 ```powershell
 python scripts\clone_lark_doc.py "https://example.feishu.cn/docx/xxxx" --parent-token "folder_token"
+```
+
+批量复刻：
+
+```powershell
+python scripts\clone_lark_doc.py --docs-file docs.txt --continue-on-error
+```
+
+`docs.txt` 每行一个飞书文档链接。
+空行和 `#` 开头的行会跳过。
+
+输出保真报告但不创建文档：
+
+```powershell
+python scripts\clone_lark_doc.py "https://example.feishu.cn/docx/xxxx" --fetch-only
+```
+
+下载 XML 里能识别到 token 的图片和附件：
+
+```powershell
+python scripts\clone_lark_doc.py "https://example.feishu.cn/docx/xxxx" --download-media
+```
+
+把 Base、画板、同步块等高风险块降级成文本占位：
+
+```powershell
+python scripts\clone_lark_doc.py "https://example.feishu.cn/docx/xxxx" --degrade-unsupported
 ```
 
 也可以写入配置文件：
@@ -128,11 +164,21 @@ C:\Users\<你的用户名>\.agents\lark-doc-cloner.config.json
 
 ## 二开建议
 
-- 扩展更多飞书块类型
-- 增加图片和附件搬运
-- 增加批量链接处理
-- 增加更细的样式映射
-- 增加失败块降级策略
+这些能力已经有基础框架：
+
+- 块类型扫描：输出 `block-report.json`
+- 图片和附件清单：输出 `media-manifest.json`
+- 图片和附件下载：`--download-media`
+- 批量链接处理：`--docs-file`
+- 失败块降级：`--degrade-unsupported`
+
+仍适合继续二开的方向：
+
+- 把已下载的图片和附件重新插回原位置
+- 为更多飞书块补充精确 XML 映射
+- 把表格、Base、画板做成专用复制链路
+- 为样式差异增加自动对比报告
+- 把批量任务做成可视化进度界面
 
 先读 [技术实现文档](references/technical-design.md)。
 那里写了完整流程。
