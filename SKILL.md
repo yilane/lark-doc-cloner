@@ -66,8 +66,10 @@ description: 用于复刻飞书/飞书 Wiki 文档到用户自己的飞书账号
 建议先运行：
 
 ```bash
-python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py --check
+python scripts/clone_lark_doc.py --check
 ```
+
+运行 bundled script 前，先把工作目录切换到本 Skill 的根目录（即当前 `SKILL.md` 所在目录）。不要假设 Skill 安装在某个固定用户名或固定的 `.agents` / `.codex` 路径下。
 
 如果没有安装 `lark-cli`：
 
@@ -88,7 +90,7 @@ python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py -
 使用 bundled script：
 
 ```bash
-python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
+python scripts/clone_lark_doc.py \
   --doc "飞书文档链接"
 ```
 
@@ -96,46 +98,46 @@ python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
 
 ```bash
 # 指定 profile
-python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
+python scripts/clone_lark_doc.py \
   --doc "飞书文档链接" \
   --profile "cli_xxx"
 
 # 默认创建到云盘根目录（https://my.feishu.cn/drive/me）
-python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
+python scripts/clone_lark_doc.py \
   --doc "飞书文档链接"
 
 # 创建到指定文件夹或 Wiki 节点
-python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
+python scripts/clone_lark_doc.py \
   --doc "飞书文档链接" \
   --parent-token "folder_or_wiki_node_token"
 
 # 只导出和清洗，不创建新文档
-python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
+python scripts/clone_lark_doc.py \
   --doc "飞书文档链接" \
   --fetch-only
 
 # 批量复刻，每行一个链接
-python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
+python scripts/clone_lark_doc.py \
   --docs-file "docs.txt" \
   --continue-on-error
 
 # 下载可识别 token 的图片和附件到输出目录 media/
-python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
+python scripts/clone_lark_doc.py \
   --doc "飞书文档链接" \
   --download-media
 
 # 下载后按媒体锚点插回原位置附近
-python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
+python scripts/clone_lark_doc.py \
   --doc "飞书文档链接" \
   --reinsert-media
 
 # 遇到 Base、画板、同步块等高风险块时降级为文本占位
-python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
+python scripts/clone_lark_doc.py \
   --doc "飞书文档链接" \
   --degrade-unsupported
 
 # 递归复刻 Wiki 树
-python C:/Users/eryue/.agents/skills/lark-doc-cloner/scripts/clone_lark_doc.py \
+python scripts/clone_lark_doc.py \
   --doc "飞书 Wiki 链接" \
   --wiki-recursive
 ```

@@ -32,13 +32,23 @@
 
 ## 安装 Skill
 
+### 让 AI 自己装
+
+对**任意 Agent**（Claude Code / Codex / Cursor 等）说一句：
+
+> 请帮我查找并自动安装 [yilane/lark-doc-cloner](https://github.com/yilane/lark-doc-cloner) 这个 Skill。
+
+它会自行 clone 到对应的 skills 目录并接入。
+
+### 手动安装
+
 把仓库复制到你的 Skill 目录：
 
 ```powershell
-git clone https://github.com/yilane/lark-doc-cloner.git C:\Users\eryue\.agents\skills\lark-doc-cloner
+git clone https://github.com/yilane/lark-doc-cloner.git "$HOME\.agents\skills\lark-doc-cloner"
 ```
 
-如果你换了用户名，请把路径里的 `eryue` 改成自己的 Windows 用户名。
+`$HOME` 会自动指向当前 Windows 用户的主目录，无需手动替换用户名。
 
 ## 前置条件
 

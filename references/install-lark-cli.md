@@ -65,5 +65,7 @@ lark-cli auth login
 安装后继续检查：
 
 ```powershell
-python C:\Users\eryue\.agents\skills\lark-doc-cloner\scripts\clone_lark_doc.py --check
+python scripts\clone_lark_doc.py --check
 ```
+
+执行该命令前，先把工作目录切换到 `lark-doc-cloner` Skill 根目录。不要依赖固定用户名或固定安装根目录。
