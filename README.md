@@ -36,7 +36,7 @@
 
 对**任意 Agent**（Claude Code / Codex / Cursor 等）说一句：
 
-> 请帮我查找并自动安装 [yilane/lark-doc-cloner](https://github.com/yilane/lark-doc-cloner) 这个 Skill。
+> 请帮我查找并自动安装 [https://github.com/yilane/lark-doc-cloner](https://github.com/yilane/lark-doc-cloner) 这个 Skill。
 
 它会自行 clone 到对应的 skills 目录并接入。
 
